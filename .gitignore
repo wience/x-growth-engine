@@ -25,3 +25,7 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# claude-mem auto-generated context files
+CLAUDE.md
+**/CLAUDE.md
