@@ -39,6 +39,10 @@ DRY_RUN = _bool("DRY_RUN", True)
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Singapore")
 METRICS_LOOKBACK_DAYS = int(os.getenv("METRICS_LOOKBACK_DAYS", "7") or "7")
 
+# Each slot fires at a random point in [slot_time, slot_time + jitter] minutes,
+# so posting never lands on an exact robotic cadence. 0 disables jitter.
+POSTING_JITTER_MINUTES = int(os.getenv("POSTING_JITTER_MINUTES", "30") or "30")
+
 # Posting slots: (label, "HH:MM") in TIMEZONE. The scheduler posts the next
 # approved tweet at each slot.
 POSTING_SLOTS = [

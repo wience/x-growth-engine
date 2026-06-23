@@ -80,18 +80,22 @@ def daily_analytics(db: Database, x: XClient) -> None:
 def build_scheduler(db: Database, x: XClient) -> BlockingScheduler:
     sched = BlockingScheduler(timezone=config.TIMEZONE)
 
+    jitter = config.POSTING_JITTER_MINUTES * 60
     for label, hhmm in config.POSTING_SLOTS:
         hour, minute = (int(p) for p in hhmm.split(":"))
         sched.add_job(
             post_next_approved,
-            CronTrigger(hour=hour, minute=minute),
+            CronTrigger(hour=hour, minute=minute, jitter=jitter),
             kwargs={"db": db, "x": x, "slot": label},
             id=f"slot_{label}",
             name=f"post::{label}",
             max_instances=1,
             coalesce=True,
         )
-        log.info("Scheduled slot '%s' at %s %s", label, hhmm, config.TIMEZONE)
+        log.info(
+            "Scheduled slot '%s' at %s (+0-%dm jitter) %s",
+            label, hhmm, config.POSTING_JITTER_MINUTES, config.TIMEZONE,
+        )
 
     a_hour, a_minute = (int(p) for p in config.ANALYTICS_TIME.split(":"))
     sched.add_job(
