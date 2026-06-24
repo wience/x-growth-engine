@@ -7,6 +7,8 @@ Auth: every update is rejected unless effective_user.id == TELEGRAM_USER_ID.
 """
 import functools
 import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -76,6 +78,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "X growth engine control panel.\n\n"
         "/queue — review up to 5 drafts (Approve / Edit / Skip)\n"
         "/pending — counts of drafts, approved, posted today\n"
+        "/scheduled — approved tweets in posting order + when\n"
         "/stats — current account metrics\n"
         "/insights — what's converting (once you've posted enough)\n"
         "/pause — stop the scheduler from posting\n"
@@ -133,6 +136,51 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"tweets: {m['tweet_count']}\n"
         f"listed: {m['listed_count']}"
     )
+
+
+def _upcoming_slots(k: int) -> list[tuple[str, datetime]]:
+    """The next k posting windows (label, window-start datetime), in time order."""
+    tz = ZoneInfo(config.TIMEZONE)
+    now = datetime.now(tz)
+    out: list[tuple[str, datetime]] = []
+    day = 0
+    while len(out) < k and day < 14:
+        base = (now + timedelta(days=day)).date()
+        for label, hhmm in config.POSTING_SLOTS:
+            h, m = (int(p) for p in hhmm.split(":"))
+            dt = datetime(base.year, base.month, base.day, h, m, tzinfo=tz)
+            if dt >= now:
+                out.append((label, dt))
+        day += 1
+    out.sort(key=lambda x: x[1])
+    return out[:k]
+
+
+@restricted
+async def cmd_scheduled(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Approved tweets in the order they'll post, mapped to upcoming windows."""
+    approved = _db(context).get_drafts("approved", limit=10)
+    if not approved:
+        await update.message.reply_text(
+            "Nothing approved. Approve drafts in /queue and they'll line up here."
+        )
+        return
+    if _db(context).is_paused():
+        await update.message.reply_text("⏸ Paused — these won't post until /resume.")
+    slots = _upcoming_slots(len(approved))
+    jitter = config.POSTING_JITTER_MINUTES
+    lines = [f"{len(approved)} approved, posting oldest-first (1 per slot):"]
+    for i, d in enumerate(approved):
+        text = (d.get("content") or "").replace("\n", " ")[:50]
+        if i < len(slots):
+            label, dt = slots[i]
+            end = dt + timedelta(minutes=jitter)
+            when = f"{dt:%a} {label} ({dt:%H:%M}-{end:%H:%M})"
+        else:
+            when = "later"
+        lines.append(f"{i + 1}. {when}\n   {text}")
+    lines.append("\nexact time within each window is random.")
+    await update.message.reply_text("\n".join(lines))
 
 
 @restricted
@@ -225,6 +273,7 @@ def build_app(db: Database, x: XClient) -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("pending", cmd_pending))
+    app.add_handler(CommandHandler("scheduled", cmd_scheduled))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("insights", cmd_insights))
     app.add_handler(CommandHandler("pause", cmd_pause))
