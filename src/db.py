@@ -41,6 +41,9 @@ class Database:
         thread_parent_id: str | None = None,
         thread_index: int = 0,
         source: str = "routine",
+        tone: str | None = None,
+        hook_type: str | None = None,
+        score: int | None = None,
     ) -> dict:
         row = {
             "content": content,
@@ -51,6 +54,9 @@ class Database:
             "thread_parent_id": thread_parent_id,
             "thread_index": thread_index,
             "source": source,
+            "tone": tone,
+            "hook_type": hook_type,
+            "score": score,
             "status": "draft",
         }
         resp = self._c.table("tweet_queue").insert(row).execute()
@@ -136,7 +142,7 @@ class Database:
         cutoff = (datetime.now(_TZ) - timedelta(days=lookback_days)).isoformat()
         resp = (
             self._c.table("tweet_queue")
-            .select("id,content,tweet_id,posted_at")
+            .select("id,content,tweet_id,posted_at,pillar,tone,hook_type,slot,format,score")
             .eq("status", "posted")
             .gte("posted_at", cutoff)
             .not_.is_("tweet_id", "null")
@@ -212,6 +218,92 @@ class Database:
             .execute()
         )
         return resp.data[0] if resp.data else {}
+
+    # ── self-improving feedback: read what's working ─────────────────
+    def get_performance_summary(
+        self, *, min_posted: int = 10, lookback_days: int = 30
+    ) -> dict:
+        """Slice engagement by tone/pillar/hook_type/slot over posted tweets.
+
+        Reads the `tweet_performance` view (engagement joined to dimensions).
+        Returns {"ready": False, ...} until there's enough data to trust, so
+        the generator's STEP 0 stays dormant at cold start. When impressions
+        are missing (cheap API tier), ranks by weighted_engagement instead of
+        engagement_rate.
+        """
+        cutoff = (datetime.now(_TZ) - timedelta(days=lookback_days)).isoformat()
+        resp = (
+            self._c.table("tweet_performance")
+            .select("*")
+            .gte("posted_at", cutoff)
+            .execute()
+        )
+        rows = resp.data or []
+        if len(rows) < min_posted:
+            return {"ready": False, "reason": "cold-start", "n_posted": len(rows)}
+
+        has_impressions = any((r.get("impressions") or 0) > 0 for r in rows)
+        signal = "engagement_rate" if has_impressions else "weighted_engagement"
+
+        def _agg(dimension: str) -> list[dict]:
+            groups: dict[str, list[dict]] = {}
+            for r in rows:
+                key = r.get(dimension) or "unknown"
+                groups.setdefault(key, []).append(r)
+            out = []
+            for key, items in groups.items():
+                n = len(items)
+                rates = [r["engagement_rate"] for r in items if r.get("engagement_rate") is not None]
+                avg_rate = round(sum(rates) / len(rates), 4) if rates else None
+                avg_weighted = round(
+                    sum(r.get("weighted_engagement") or 0 for r in items) / n, 2
+                )
+                total_replies = sum(r.get("replies") or 0 for r in items)
+                out.append(
+                    {
+                        "value": key,
+                        "n": n,
+                        "avg_engagement_rate": avg_rate,
+                        "avg_weighted_engagement": avg_weighted,
+                        "total_replies": total_replies,
+                    }
+                )
+            sort_key = "avg_engagement_rate" if has_impressions else "avg_weighted_engagement"
+            out.sort(key=lambda d: (d[sort_key] is not None, d[sort_key] or 0), reverse=True)
+            return out
+
+        return {
+            "ready": True,
+            "n_posted": len(rows),
+            "signal": signal,
+            "by_tone": _agg("tone"),
+            "by_pillar": _agg("pillar"),
+            "by_hook_type": _agg("hook_type"),
+            "by_slot": _agg("slot"),
+        }
+
+    def get_follower_trend(self, lookback_days: int = 14) -> dict:
+        """Follower delta over a window, from analytics_daily snapshots."""
+        cutoff = (datetime.now(_TZ) - timedelta(days=lookback_days)).date().isoformat()
+        resp = (
+            self._c.table("analytics_daily")
+            .select("date,followers_count")
+            .gte("date", cutoff)
+            .order("date")
+            .execute()
+        )
+        rows = resp.data or []
+        if len(rows) < 2:
+            return {"ready": False, "n_days": len(rows)}
+        start = rows[0].get("followers_count") or 0
+        end = rows[-1].get("followers_count") or 0
+        return {
+            "ready": True,
+            "start": start,
+            "end": end,
+            "delta": end - start,
+            "days": len(rows),
+        }
 
     # ── pause flag (shared between bot and scheduler) ────────────────
     def is_paused(self) -> bool:

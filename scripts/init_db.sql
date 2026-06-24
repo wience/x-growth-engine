@@ -88,3 +88,42 @@ begin
   return next claimed;
 end;
 $$;
+
+-- ── migration 2026-06: dimensions for the self-improving feedback loop ──
+-- Additive and idempotent: existing rows get NULL, nothing breaks. These let us
+-- slice engagement by tone/hook_type and compare predicted score vs reality.
+alter table tweet_queue add column if not exists tone       text;  -- humor | technical
+alter table tweet_queue add column if not exists hook_type  text;
+alter table tweet_queue add column if not exists score      int;   -- predicted total at generation time
+
+-- ── tweet_performance: engagement joined to the dimensions of each posted tweet ──
+-- left join so posted-but-not-yet-refreshed tweets still show up. engagement_rate
+-- is NULL (not 0) when impressions are unknown, so rate-based ranking can skip them
+-- and fall back to weighted_engagement (which biases toward inbound signals).
+create or replace view tweet_performance as
+select
+  q.id,
+  q.tweet_id,
+  q.pillar,
+  q.tone,
+  q.hook_type,
+  q.slot,
+  q.format,
+  q.score                    as predicted_score,
+  q.posted_at,
+  coalesce(m.likes, 0)       as likes,
+  coalesce(m.retweets, 0)    as retweets,
+  coalesce(m.replies, 0)     as replies,
+  coalesce(m.bookmarks, 0)   as bookmarks,
+  coalesce(m.impressions, 0) as impressions,
+  (coalesce(m.likes, 0) + 2 * coalesce(m.replies, 0)
+   + 3 * coalesce(m.bookmarks, 0) + coalesce(m.retweets, 0)) as weighted_engagement,
+  case when coalesce(m.impressions, 0) > 0
+       then round(
+              (coalesce(m.likes, 0) + coalesce(m.replies, 0)
+               + coalesce(m.bookmarks, 0) + coalesce(m.retweets, 0))::numeric
+              / m.impressions, 4)
+       else null end         as engagement_rate
+from tweet_queue q
+left join tweet_metrics m on m.tweet_id = q.tweet_id
+where q.status = 'posted' and q.tweet_id is not null;

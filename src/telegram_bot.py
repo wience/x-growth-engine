@@ -77,6 +77,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/queue — review up to 5 drafts (Approve / Edit / Skip)\n"
         "/pending — counts of drafts, approved, posted today\n"
         "/stats — current account metrics\n"
+        "/insights — what's converting (once you've posted enough)\n"
         "/pause — stop the scheduler from posting\n"
         "/resume — allow posting again"
     )
@@ -132,6 +133,40 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"tweets: {m['tweet_count']}\n"
         f"listed: {m['listed_count']}"
     )
+
+
+@restricted
+async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """What's converting, sliced by tone/pillar/hook. Dormant until enough posts."""
+    db = _db(context)
+    summary = db.get_performance_summary()
+    trend = db.get_follower_trend()
+
+    lines = []
+    if trend.get("ready"):
+        d = trend["delta"]
+        sign = "+" if d >= 0 else ""
+        lines.append(f"followers: {trend['end']} ({sign}{d} over {trend['days']}d)")
+
+    if not summary.get("ready"):
+        lines.append(
+            f"cold-start: not enough data yet ({summary.get('n_posted', 0)} posted). "
+            "Need ~10 posted tweets before insights mean anything."
+        )
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    lines.append(f"\nbased on {summary['n_posted']} posts, ranked by {summary['signal']}:")
+    metric_key = (
+        "avg_engagement_rate"
+        if summary["signal"] == "engagement_rate"
+        else "avg_weighted_engagement"
+    )
+    for label, dim in (("tone", "by_tone"), ("pillar", "by_pillar"), ("hook", "by_hook_type")):
+        top = summary[dim][:3]
+        parts = [f"{r['value']} ({r[metric_key]}, n={r['n']})" for r in top]
+        lines.append(f"\n{label}: " + " · ".join(parts))
+    await update.message.reply_text("\n".join(lines))
 
 
 @restricted
@@ -191,6 +226,7 @@ def build_app(db: Database, x: XClient) -> Application:
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("pending", cmd_pending))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("insights", cmd_insights))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CallbackQueryHandler(on_button))

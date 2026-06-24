@@ -45,6 +45,7 @@ class FakeQuery:
 
     def select(self, *args, count=None):
         self.op = self.op or "select"
+        self.select_args = args
         self.select_count = count
         return self
 
@@ -176,3 +177,69 @@ def test_pause_flag_roundtrip(client, db):
 
     client.next_data = []
     assert db.is_paused() is False
+
+
+# ── feedback-loop dimensions ─────────────────────────────────────────
+def test_add_draft_persists_tone_hook_score(client, db):
+    client.next_data = [{"id": "1"}]
+    db.add_draft("hi", tone="humor", hook_type="relatable confession", score=27)
+    p = client.last.payload
+    assert p["tone"] == "humor"
+    assert p["hook_type"] == "relatable confession"
+    assert p["score"] == 27
+
+
+def test_get_recent_posted_carries_dimensions(client, db):
+    client.next_data = [{"id": "1"}]
+    db.get_recent_posted()
+    cols = client.last.select_args[0]
+    for c in ("pillar", "tone", "hook_type", "slot", "format", "score"):
+        assert c in cols
+
+
+def test_performance_summary_cold_start(client, db):
+    client.next_data = [{"tweet_id": str(i)} for i in range(3)]  # < min_posted
+    out = db.get_performance_summary(min_posted=10)
+    assert out["ready"] is False
+    assert out["reason"] == "cold-start"
+    assert out["n_posted"] == 3
+
+
+def test_performance_summary_ranks_by_rate_when_impressions_exist(client, db):
+    # humor outperforms technical on engagement_rate
+    rows = []
+    for i in range(6):
+        rows.append({"tone": "humor", "pillar": "p", "hook_type": "h", "slot": "morning",
+                     "impressions": 100, "engagement_rate": 0.10, "weighted_engagement": 10, "replies": 1})
+    for i in range(6):
+        rows.append({"tone": "technical", "pillar": "p", "hook_type": "h", "slot": "lunch",
+                     "impressions": 100, "engagement_rate": 0.02, "weighted_engagement": 2, "replies": 0})
+    client.next_data = rows
+    out = db.get_performance_summary(min_posted=10)
+    assert out["ready"] is True
+    assert out["signal"] == "engagement_rate"
+    assert out["by_tone"][0]["value"] == "humor"  # highest rate ranks first
+
+
+def test_performance_summary_falls_back_without_impressions(client, db):
+    rows = [
+        {"tone": "humor", "pillar": "p", "hook_type": "h", "slot": "morning",
+         "impressions": 0, "engagement_rate": None, "weighted_engagement": 8, "replies": 2}
+        for _ in range(12)
+    ]
+    client.next_data = rows
+    out = db.get_performance_summary(min_posted=10)
+    assert out["signal"] == "weighted_engagement"
+
+
+def test_follower_trend(client, db):
+    client.next_data = []
+    assert db.get_follower_trend()["ready"] is False
+
+    client.next_data = [
+        {"date": "2026-06-01", "followers_count": 10},
+        {"date": "2026-06-14", "followers_count": 25},
+    ]
+    out = db.get_follower_trend()
+    assert out["ready"] is True
+    assert out["delta"] == 15

@@ -41,6 +41,9 @@ def load(path: str) -> int:
             "grounded_in": item.get("grounded_in"),
             "slot": item.get("slot"),
             "source": item.get("source", "manual"),
+            "tone": item.get("tone"),
+            "hook_type": item.get("hook_type"),
+            "score": item.get("score"),
         }
 
         if item.get("format") == "thread" or item.get("tweets"):
